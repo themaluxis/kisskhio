@@ -1,0 +1,34 @@
+{
+  "name": "kisskh-stremio-addon",
+  "version": "1.4.0",
+  "description": "Stremio addon for KissKH - Asian Dramas, Movies, Anime with French subtitles",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "stremio",
+    "addon",
+    "kisskh",
+    "asian-drama",
+    "anime",
+    "french-subtitles"
+  ],
+  "author": "themaluxis",
+  "license": "MIT",
+  "type": "commonjs",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/themaluxis/kisskhio"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "needle": "^3.3.1",
+    "stremio-addon-sdk": "^1.6.10",
+    "vm2": "^3.10.3"
+  }
+}

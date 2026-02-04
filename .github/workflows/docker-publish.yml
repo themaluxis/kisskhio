@@ -1,0 +1,85 @@
+name: Docker Image CI
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      # 1️⃣ Checkout source
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 2️⃣ Extract version from package.json
+      - name: Get version from package.json
+        id: get-version
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+
+          if [ -z "$VERSION" ]; then
+            echo "❌ Version not found in package.json"
+            exit 1
+          fi
+
+          echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Extracted version: $VERSION"
+
+      # 3️⃣ Generate Docker metadata (tags + labels)
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/kisskh-addon
+            ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=${{ steps.get-version.outputs.VERSION }}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      # 4️⃣ Enable QEMU for multi-arch builds
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      # 5️⃣ Enable Docker Buildx
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # 6️⃣ Login to Docker Hub
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # 7️⃣ Login to GitHub Container Registry
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 8️⃣ (Optional) Debug tags
+      - name: Debug Docker tags
+        run: |
+          echo "Docker tags to be pushed:"
+          echo "${{ steps.meta.outputs.tags }}"
+
+      # 9️⃣ Build and push multi-arch image
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
