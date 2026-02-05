@@ -515,29 +515,13 @@ async function buildStreamFromKissKH(seriesId, episodeId) {
                     url: proxiedUrl,
                     subtitles: subtitles,
                     behaviorHints: {
-                        bingeGroup: `kisskh-${seriesId}`
+                        bingeGroup: `kisskh-${seriesId}`,
+                        audioLanguages: ['fr'],
+                        subtitleLanguages: ['fr']
                     }
                 };
 
                 streams.push(streamInfo);
-
-                // Also add direct stream as backup with same subtitles
-                streams.push({
-                    name: 'KissKH Direct 🇫🇷',
-                    title: `${quality} ${isHLS ? '(HLS)' : '(MP4)'} Direct - French Subs`,
-                    url: videoUrl,
-                    subtitles: subtitles,
-                    behaviorHints: {
-                        bingeGroup: `kisskh-${seriesId}`,
-                        notWebReady: isHLS,
-                        proxyHeaders: {
-                            request: {
-                                'Referer': BASE_URL + '/',
-                                'Origin': BASE_URL
-                            }
-                        }
-                    }
-                });
             }
         } else {
             console.log('Episode not yet released (countdown found)');
