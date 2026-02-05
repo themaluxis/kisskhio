@@ -100,7 +100,9 @@ function buildMediaFlowUrl(videoUrl, isHLS = false) {
         'api_password': MEDIAFLOW_API_PASSWORD
     });
 
-    return `${MEDIAFLOW_PROXY_URL}${endpoint}?${params.toString()}`;
+    // Remove trailing slash from proxy URL to avoid double slashes
+    const baseUrl = MEDIAFLOW_PROXY_URL.replace(/\/+$/, '');
+    return `${baseUrl}${endpoint}?${params.toString()}`;
 }
 
 // Format subtitles for Stremio with proper ISO 639-1 language codes
