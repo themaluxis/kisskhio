@@ -125,13 +125,13 @@ function formatSubtitlesForStremio(subtitles) {
 // ========================================
 const manifest = {
     id: 'community.kisskh.fr',
-    version: '1.4.0',
+    version: '1.5.0',
     name: 'KissKH 🇫🇷',
     description: 'Asian Dramas, Movies, Anime with French subtitles from KissKH',
     logo: 'https://kisskh.ovh/favicon.ico',
     resources: ['catalog', 'meta', 'stream', 'subtitles'],
     types: ['movie', 'series'],
-    idPrefixes: ['kisskh:'],
+    idPrefixes: ['kisskh:', 'tt'],
     catalogs: [
         {
             type: 'series',
@@ -415,6 +415,136 @@ async function getSubtitles(episodeId) {
     }
 }
 
+// Fetch metadata from Cinemeta (Stremio's default metadata addon)
+async function getCinemetaMeta(type, imdbId) {
+    try {
+        const url = `https://cinemeta-live.strem.io/meta/${type}/${imdbId}.json`;
+        console.log(`Fetching Cinemeta: ${url}`);
+        const response = await needle('get', url, { json: true, timeout: 10000, follow_max: 5 });
+
+        if (response.statusCode === 200 && response.body && response.body.meta) {
+            return response.body.meta;
+        }
+        return null;
+    } catch (error) {
+        console.error(`Error fetching Cinemeta:`, error.message);
+        return null;
+    }
+}
+
+// Parse IMDb-style ID: tt1234567 or tt1234567:1:5 (for series: imdbId:season:episode)
+function parseImdbId(id) {
+    // Handle series format: tt1234567:1:5 (imdb:season:episode)
+    const sMatch = id.match(/^(tt\d+):(\d+):(\d+)$/);
+    if (sMatch) {
+        return {
+            imdbId: sMatch[1],
+            season: parseInt(sMatch[2]),
+            episode: parseInt(sMatch[3])
+        };
+    }
+
+    // Handle movie format: tt1234567
+    const mMatch = id.match(/^(tt\d+)$/);
+    if (mMatch) {
+        return {
+            imdbId: mMatch[1],
+            season: null,
+            episode: null
+        };
+    }
+
+    return null;
+}
+
+// Build stream info object
+async function buildStreamFromKissKH(seriesId, episodeId) {
+    const streams = [];
+
+    const streamData = await getEpisodeStream(episodeId);
+
+    if (streamData && streamData.Video) {
+        const videoUrl = streamData.Video;
+
+        // Check if it's not a countdown (unreleased)
+        if (!videoUrl.includes('tickcounter.com')) {
+            // Try to get subtitles first - we only show streams with French subtitles
+            let subtitles = [];
+            let hasFrenchSubs = false;
+
+            try {
+                const rawSubtitles = await getSubtitles(episodeId);
+                if (rawSubtitles && Array.isArray(rawSubtitles) && rawSubtitles.length > 0) {
+                    // Check if French subtitles are available
+                    hasFrenchSubs = rawSubtitles.some(sub => {
+                        const label = (sub.label || sub.language || '').toLowerCase();
+                        return label === 'french' || label === 'français' || label === 'fr';
+                    });
+
+                    if (hasFrenchSubs) {
+                        // Format all subtitles for Stremio with proper ISO codes
+                        subtitles = formatSubtitlesForStremio(rawSubtitles);
+                        console.log(`Found ${subtitles.length} subtitles, including French`);
+                    } else {
+                        console.log(`No French subtitles found for episode ${episodeId}`);
+                    }
+                }
+            } catch (subError) {
+                console.error('Error fetching subtitles:', subError.message);
+            }
+
+            // Only add stream if it has French subtitles
+            if (hasFrenchSubs) {
+                // Determine quality from URL if possible
+                let quality = 'HD';
+                if (videoUrl.includes('1080')) quality = '1080p';
+                else if (videoUrl.includes('720')) quality = '720p';
+                else if (videoUrl.includes('480')) quality = '480p';
+
+                const isHLS = videoUrl.includes('.m3u8');
+
+                // Build MediaFlow Proxy URL
+                const proxiedUrl = buildMediaFlowUrl(videoUrl, isHLS);
+                console.log(`MediaFlow URL: ${proxiedUrl.substring(0, 100)}...`);
+
+                const streamInfo = {
+                    name: 'KissKH 🇫🇷',
+                    title: `${quality} ${isHLS ? '(HLS)' : '(MP4)'} - French Subs`,
+                    url: proxiedUrl,
+                    subtitles: subtitles,
+                    behaviorHints: {
+                        bingeGroup: `kisskh-${seriesId}`
+                    }
+                };
+
+                streams.push(streamInfo);
+
+                // Also add direct stream as backup with same subtitles
+                streams.push({
+                    name: 'KissKH Direct 🇫🇷',
+                    title: `${quality} ${isHLS ? '(HLS)' : '(MP4)'} Direct - French Subs`,
+                    url: videoUrl,
+                    subtitles: subtitles,
+                    behaviorHints: {
+                        bingeGroup: `kisskh-${seriesId}`,
+                        notWebReady: isHLS,
+                        proxyHeaders: {
+                            request: {
+                                'Referer': BASE_URL + '/',
+                                'Origin': BASE_URL
+                            }
+                        }
+                    }
+                });
+            }
+        } else {
+            console.log('Episode not yet released (countdown found)');
+        }
+    }
+
+    return streams;
+}
+
 
 // ========================================
 // Convert to Stremio format
@@ -545,104 +675,125 @@ builder.defineStreamHandler(async ({ type, id }) => {
 
     const streams = [];
 
-    // Parse ID format: kisskh:seriesId or kisskh:seriesId:episodeId
-    const parts = id.replace('kisskh:', '').split(':');
-    const seriesId = parts[0];
-    let episodeId = parts[1];
-
     try {
-        // If no episode ID, get the series info first
-        if (!episodeId) {
-            const details = await getSeriesDetails(seriesId);
-            if (details && details.episodes && details.episodes.length > 0) {
-                // For movies, get the first/only episode
-                // Sort by episode number and get the first one
-                const sortedEpisodes = [...details.episodes].sort((a, b) => {
-                    return parseFloat(a.number) - parseFloat(b.number);
-                });
-                episodeId = sortedEpisodes[0].id;
+        // Check if this is a KissKH internal ID
+        if (id.startsWith('kisskh:')) {
+            // Parse ID format: kisskh:seriesId or kisskh:seriesId:episodeId
+            const parts = id.replace('kisskh:', '').split(':');
+            const seriesId = parts[0];
+            let episodeId = parts[1];
+
+            // If no episode ID, get the series info first
+            if (!episodeId) {
+                const details = await getSeriesDetails(seriesId);
+                if (details && details.episodes && details.episodes.length > 0) {
+                    // For movies, get the first/only episode
+                    const sortedEpisodes = [...details.episodes].sort((a, b) => {
+                        return parseFloat(a.number) - parseFloat(b.number);
+                    });
+                    episodeId = sortedEpisodes[0].id;
+                }
+            }
+
+            if (episodeId) {
+                const kisskhStreams = await buildStreamFromKissKH(seriesId, episodeId);
+                streams.push(...kisskhStreams);
             }
         }
+        // Handle IMDb IDs (from Cinemata and other addons)
+        else if (id.startsWith('tt')) {
+            const parsed = parseImdbId(id);
 
-        if (episodeId) {
-            const streamData = await getEpisodeStream(episodeId);
+            if (parsed) {
+                console.log(`Parsed IMDb ID: ${parsed.imdbId}, Season: ${parsed.season}, Episode: ${parsed.episode}`);
 
-            if (streamData && streamData.Video) {
-                const videoUrl = streamData.Video;
+                // Get title from Cinemeta
+                const meta = await getCinemetaMeta(type, parsed.imdbId);
 
-                // Check if it's not a countdown (unreleased)
-                if (!videoUrl.includes('tickcounter.com')) {
-                    // Try to get subtitles first - we only show streams with French subtitles
-                    let subtitles = [];
-                    let hasFrenchSubs = false;
+                if (meta && meta.name) {
+                    console.log(`Searching KissKH for: "${meta.name}"`);
 
-                    try {
-                        const rawSubtitles = await getSubtitles(episodeId);
-                        if (rawSubtitles && Array.isArray(rawSubtitles) && rawSubtitles.length > 0) {
-                            // Check if French subtitles are available
-                            hasFrenchSubs = rawSubtitles.some(sub => {
-                                const label = (sub.label || sub.language || '').toLowerCase();
-                                return label === 'french' || label === 'français' || label === 'fr';
-                            });
+                    // Search KissKH for this title
+                    const searchResults = await searchKissKH(meta.name);
 
-                            if (hasFrenchSubs) {
-                                // Format all subtitles for Stremio with proper ISO codes
-                                subtitles = formatSubtitlesForStremio(rawSubtitles);
-                                console.log(`Found ${subtitles.length} subtitles, including French`);
-                            } else {
-                                console.log(`No French subtitles found for episode ${episodeId}`);
+                    if (searchResults.length > 0) {
+                        console.log(`Found ${searchResults.length} results in KissKH`);
+
+                        // Try to find the best match
+                        for (const result of searchResults.slice(0, 3)) {
+                            const details = await getSeriesDetails(result.id);
+
+                            if (!details || !details.episodes || details.episodes.length === 0) {
+                                continue;
                             }
-                        }
-                    } catch (subError) {
-                        console.error('Error fetching subtitles:', subError.message);
-                    }
 
-                    // Only add stream if it has French subtitles
-                    if (hasFrenchSubs) {
-                        // Determine quality from URL if possible
-                        let quality = 'HD';
-                        if (videoUrl.includes('1080')) quality = '1080p';
-                        else if (videoUrl.includes('720')) quality = '720p';
-                        else if (videoUrl.includes('480')) quality = '480p';
+                            // Check if title matches reasonably well
+                            const resultTitle = details.title?.toLowerCase() || '';
+                            const searchTitle = meta.name.toLowerCase();
 
-                        const isHLS = videoUrl.includes('.m3u8');
+                            // Allow partial match
+                            if (!resultTitle.includes(searchTitle) && !searchTitle.includes(resultTitle)) {
+                                // Try word-by-word matching
+                                const searchWords = searchTitle.split(/\s+/);
+                                const resultWords = resultTitle.split(/\s+/);
+                                const matchingWords = searchWords.filter(w => resultWords.some(rw => rw.includes(w) || w.includes(rw)));
 
-                        // Build MediaFlow Proxy URL
-                        const proxiedUrl = buildMediaFlowUrl(videoUrl, isHLS);
-                        console.log(`MediaFlow URL: ${proxiedUrl.substring(0, 100)}...`);
-
-                        const streamInfo = {
-                            name: 'KissKH 🇫🇷',
-                            title: `${quality} ${isHLS ? '(HLS)' : '(MP4)'} - French Subs`,
-                            url: proxiedUrl,
-                            subtitles: subtitles,
-                            behaviorHints: {
-                                bingeGroup: `kisskh-${seriesId}`
-                            }
-                        };
-
-                        streams.push(streamInfo);
-
-                        // Also add direct stream as backup with same subtitles
-                        streams.push({
-                            name: 'KissKH Direct 🇫🇷',
-                            title: `${quality} ${isHLS ? '(HLS)' : '(MP4)'} Direct - French Subs`,
-                            url: videoUrl,
-                            subtitles: subtitles,
-                            behaviorHints: {
-                                bingeGroup: `kisskh-${seriesId}`,
-                                notWebReady: isHLS,
-                                proxyHeaders: {
-                                    request: {
-                                        'Referer': BASE_URL + '/',
-                                        'Origin': BASE_URL
-                                    }
+                                if (matchingWords.length < Math.min(2, searchWords.length)) {
+                                    continue;
                                 }
                             }
-                        });
+
+                            // Sort episodes by number
+                            const sortedEpisodes = [...details.episodes].sort((a, b) => {
+                                return parseFloat(a.number) - parseFloat(b.number);
+                            });
+
+                            let targetEpisode;
+
+                            if (type === 'movie' || (parsed.season === null && parsed.episode === null)) {
+                                // For movies, get the first episode
+                                targetEpisode = sortedEpisodes[0];
+                            } else if (parsed.season !== null && parsed.episode !== null) {
+                                // For series, find matching episode
+                                // KissKH uses episode numbers, not season+episode
+                                // Try to find exact episode number match first
+                                targetEpisode = sortedEpisodes.find(ep => {
+                                    const epNum = parseFloat(ep.number);
+                                    return epNum === parsed.episode;
+                                });
+
+                                // If not found and season > 1, calculate cumulative episode number
+                                // This is a rough heuristic that may not always work
+                                if (!targetEpisode && parsed.season > 1) {
+                                    console.log(`Episode ${parsed.episode} not found, this might be a multi-season show`);
+                                }
+
+                                // Fallback: just use the episode number directly
+                                if (!targetEpisode && parsed.episode <= sortedEpisodes.length) {
+                                    targetEpisode = sortedEpisodes[parsed.episode - 1];
+                                }
+                            }
+
+                            if (targetEpisode) {
+                                console.log(`Found matching episode: ${targetEpisode.id} (${targetEpisode.number})`);
+
+                                const kisskhStreams = await buildStreamFromKissKH(details.id, targetEpisode.id);
+
+                                if (kisskhStreams.length > 0) {
+                                    // Add source info to stream titles
+                                    for (const stream of kisskhStreams) {
+                                        stream.title = `${details.title}\n${stream.title}`;
+                                    }
+                                    streams.push(...kisskhStreams);
+                                    break; // Found streams, no need to check more results
+                                }
+                            }
+                        }
+                    } else {
+                        console.log(`No results found in KissKH for: "${meta.name}"`);
                     }
                 } else {
-                    console.log('Episode not yet released (countdown found)');
+                    console.log(`Could not get metadata from Cinemeta for: ${id}`);
                 }
             }
         }
@@ -650,6 +801,7 @@ builder.defineStreamHandler(async ({ type, id }) => {
         console.error('Stream handler error:', error.message);
     }
 
+    console.log(`Returning ${streams.length} streams`);
     return { streams };
 });
 
