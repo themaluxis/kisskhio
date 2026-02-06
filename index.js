@@ -182,25 +182,43 @@ const manifest = {
 // API Helper Functions
 // ========================================
 
-async function makeRequest(url, options = {}) {
+async function makeRequest(url, options = {}, retries = 3) {
     const opts = {
         headers: { ...HEADERS, ...options.headers },
         json: options.json !== false,
         follow_max: 5,
-        timeout: 15000
+        timeout: 20000  // Increased timeout
     };
 
-    try {
-        const response = await needle('get', url, opts);
-        if (response.statusCode >= 200 && response.statusCode < 300) {
-            return response.body;
+    for (let attempt = 1; attempt <= retries; attempt++) {
+        try {
+            const response = await needle('get', url, opts);
+            if (response.statusCode >= 200 && response.statusCode < 300) {
+                return response.body;
+            }
+
+            // Retry on 502, 503, 504 errors
+            if ([502, 503, 504].includes(response.statusCode) && attempt < retries) {
+                const delay = attempt * 1000; // 1s, 2s, 3s
+                console.warn(`Request failed (${response.statusCode}), retrying in ${delay}ms... (${attempt}/${retries})`);
+                await new Promise(resolve => setTimeout(resolve, delay));
+                continue;
+            }
+
+            console.error(`Request failed: ${url} - Status: ${response.statusCode}`);
+            return null;
+        } catch (error) {
+            if (attempt < retries) {
+                const delay = attempt * 1000;
+                console.warn(`Request error, retrying in ${delay}ms... (${attempt}/${retries}): ${error.message}`);
+                await new Promise(resolve => setTimeout(resolve, delay));
+                continue;
+            }
+            console.error(`Request error: ${url}`, error.message);
+            return null;
         }
-        console.error(`Request failed: ${url} - Status: ${response.statusCode}`);
-        return null;
-    } catch (error) {
-        console.error(`Request error: ${url}`, error.message);
-        return null;
     }
+    return null;
 }
 
 // Fetch token generation JavaScript code from KissKH
@@ -330,51 +348,68 @@ async function getSeriesDetails(seriesId) {
     }
 }
 
-async function getEpisodeStream(episodeId) {
-    try {
-        const token = await generateToken(episodeId, TOKEN_CONFIG.viGuid);
-        const url = `${API_URL}/Episode/${episodeId}.png?kkey=${token}`;
-        console.log(`Fetching stream: ${url}`);
+async function getEpisodeStream(episodeId, retries = 3) {
+    for (let attempt = 1; attempt <= retries; attempt++) {
+        try {
+            const token = await generateToken(episodeId, TOKEN_CONFIG.viGuid);
+            const url = `${API_URL}/Episode/${episodeId}.png?kkey=${token}`;
+            console.log(`Fetching stream (attempt ${attempt}/${retries}): ${url}`);
 
-        const response = await needle('get', url, {
-            headers: HEADERS,
-            follow_max: 5,
-            timeout: 15000
-        });
+            const response = await needle('get', url, {
+                headers: HEADERS,
+                follow_max: 5,
+                timeout: 20000
+            });
 
-        console.log(`Stream response status: ${response.statusCode}`);
+            console.log(`Stream response status: ${response.statusCode}`);
 
-        if (response.statusCode >= 200 && response.statusCode < 300) {
-            let data = response.body;
-
-            // Handle Buffer response
-            if (Buffer.isBuffer(data)) {
-                const str = data.toString('utf-8');
-                console.log(`Raw response: ${str.substring(0, 200)}`);
-                try {
-                    data = JSON.parse(str);
-                } catch (e) {
-                    console.error('Failed to parse buffer as JSON:', e.message);
-                    return null;
-                }
-            } else if (typeof data === 'string') {
-                try {
-                    data = JSON.parse(data);
-                } catch (e) {
-                    console.error('Failed to parse string as JSON');
-                    return null;
-                }
+            // Retry on 502, 503, 504 errors
+            if ([502, 503, 504].includes(response.statusCode) && attempt < retries) {
+                const delay = attempt * 1500; // 1.5s, 3s, 4.5s
+                console.warn(`Stream request failed (${response.statusCode}), retrying in ${delay}ms...`);
+                await new Promise(resolve => setTimeout(resolve, delay));
+                continue;
             }
 
-            console.log(`Stream Video URL: ${data?.Video?.substring(0, 100) || 'null'}`);
-            return data;
+            if (response.statusCode >= 200 && response.statusCode < 300) {
+                let data = response.body;
+
+                // Handle Buffer response
+                if (Buffer.isBuffer(data)) {
+                    const str = data.toString('utf-8');
+                    console.log(`Raw response: ${str.substring(0, 200)}`);
+                    try {
+                        data = JSON.parse(str);
+                    } catch (e) {
+                        console.error('Failed to parse buffer as JSON:', e.message);
+                        return null;
+                    }
+                } else if (typeof data === 'string') {
+                    try {
+                        data = JSON.parse(data);
+                    } catch (e) {
+                        console.error('Failed to parse string as JSON');
+                        return null;
+                    }
+                }
+
+                console.log(`Stream Video URL: ${data?.Video?.substring(0, 100) || 'null'}`);
+                return data;
+            }
+            console.error(`Stream request failed with status: ${response.statusCode}`);
+            return null;
+        } catch (error) {
+            if (attempt < retries) {
+                const delay = attempt * 1500;
+                console.warn(`Stream error, retrying in ${delay}ms... (${attempt}/${retries}): ${error.message}`);
+                await new Promise(resolve => setTimeout(resolve, delay));
+                continue;
+            }
+            console.error(`Error fetching episode stream ${episodeId}:`, error.message);
+            return null;
         }
-        console.error(`Stream request failed with status: ${response.statusCode}`);
-        return null;
-    } catch (error) {
-        console.error(`Error fetching episode stream ${episodeId}:`, error.message);
-        return null;
     }
+    return null;
 }
 
 async function getSubtitles(episodeId) {
@@ -522,6 +557,26 @@ async function buildStreamFromKissKH(seriesId, episodeId) {
                 };
 
                 streams.push(streamInfo);
+
+                // Also add direct stream as backup with same subtitles
+                streams.push({
+                    name: 'KissKH Direct 🇫🇷',
+                    title: `${quality} ${isHLS ? '(HLS)' : '(MP4)'} Direct - French Subs`,
+                    url: videoUrl,
+                    subtitles: subtitles,
+                    behaviorHints: {
+                        bingeGroup: `kisskh-${seriesId}`,
+                        notWebReady: isHLS,
+                        audioLanguages: ['fr'],
+                        subtitleLanguages: ['fr'],
+                        proxyHeaders: {
+                            request: {
+                                'Referer': BASE_URL + '/',
+                                'Origin': BASE_URL
+                            }
+                        }
+                    }
+                });
             }
         } else {
             console.log('Episode not yet released (countdown found)');
